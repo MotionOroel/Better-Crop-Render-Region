@@ -3,6 +3,9 @@ Custom Crop Render Regions
 Precisely control and scale your render crop regions numerically directly within Blender. Define your crop coordinates using either normalized fractions or concrete pixel coordinates, and watch the add-on dynamically adjust your internal render resolution to guarantee your target output dimensions and aspect ratios are perfectly maintained.
 
 Includes object-bound target extraction, region presets, robust safety aspect locks, a persistent scene bookmarking engine, and an interactive modern 2D viewport overlay shader drawing system.
+
+Tool made for personal use coded by AI
+
 Key Features
 
     Dual-Coordinate Systems: Read, modify, and precisely assign your custom region via Normalized space Factors (0.0→1.0) or Absolute Resolution Pixels seamlessly.
@@ -23,7 +26,7 @@ Installation
 
     Download the latest version source bundle (.zip format or clone the raw python file hierarchy).
 
-    Launch Blender (Version 5.1.0 or newer required).
+    Launch Blender (Version 5.1.0 or newer required) (might work on older versions, not tested).
 
     Navigate to Edit → Preferences → Add-ons.
 
@@ -73,26 +76,3 @@ Available Operators & Workflow Usage
 
         TOP_HALF / BOTTOM_HALF / LEFT_THIRD / RIGHT_THIRD
 
-Technical Architecture Overview
-
-The tool is built with performance-focused hooks to avoid render lag and protect your scene data:
-Fragmento de código
-
-graph TD
-    A[User Modifies UI Prop / Pixel / Normalised] --> B{Module Update Guard Check}
-    B -- _updating == True --> C[Drop Execution Stack / Prevent Loop]
-    B -- _updating == False --> D[Set Guard Flag _updating = True]
-    D --> E[Re-calculate Reciprocal Coordinate Arrays]
-    E --> F[Evaluate Aspect Lock Matrix Adjustments]
-    F --> G[Enforce Boundary Constraints inside 0.0-1.0 Factor space]
-    G --> H[Update Native Blender Render Properties Engine]
-    H --> I[Scale Blender Resolution Metrics dynamically based on Targets]
-    I --> J[Release Guard Flag _updating = False]
-
-    Infinite Loop Prevention: Uses a modular flag guard (_updating = True) across property sync states to stop feedback loops when translating between pixel maps and float values.
-
-    GPU Overlay Performance: Uses Blender's modern gpu and blf modules. It loads the uniform color shader layout efficiently to display region borders instantly without performance hits.
-
-License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
