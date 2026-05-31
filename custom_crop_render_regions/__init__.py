@@ -1175,11 +1175,8 @@ class CCR_OT_draw_border(Operator):
         self._active = True
         p = context.scene.ccr_props
         rd = context.scene.render
-        self._draw_base_w = max(1, p.original_w if p.has_original_resolution else rd.resolution_x)
-        self._draw_base_h = max(1, p.original_h if p.has_original_resolution else rd.resolution_y)
-        if p.has_original_resolution:
-            rd.resolution_x = self._draw_base_w
-            rd.resolution_y = self._draw_base_h
+        self._draw_base_w = max(1, rd.resolution_x)
+        self._draw_base_h = max(1, rd.resolution_y)
 
         # Register GPU draw handler on SpaceView3D
         args = (self,)
@@ -1313,7 +1310,11 @@ class CCR_OT_draw_border(Operator):
             _updating = False
 
         _clamp_crop(p)
-        _sync_pixel_from_norm(context, p)
+        _updating = True
+        try:
+            _sync_pixel_from_norm(context, p)
+        finally:
+            _updating = False
         _apply_to_render(context, p, scale_resolution=False)
 
     def _finalize_crop(self, context):
@@ -1346,7 +1347,11 @@ class CCR_OT_draw_border(Operator):
             _updating = False
 
         _clamp_crop(p)
-        _sync_pixel_from_norm(context, p)
+        _updating = True
+        try:
+            _sync_pixel_from_norm(context, p)
+        finally:
+            _updating = False
         _apply_to_render(context, p)
 
     def _cleanup(self, context):
