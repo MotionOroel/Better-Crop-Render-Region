@@ -123,8 +123,8 @@ def _restore_original_resolution(context, props) -> None:
 
 def _fit_crop_to_target_aspect(context, props) -> None:
     """Fit the current crop rectangle inside itself to match target aspect."""
-    rx = max(1, context.scene.render.resolution_x)
-    ry = max(1, context.scene.render.resolution_y)
+    rx = props.original_w if props.has_original_resolution else max(1, context.scene.render.resolution_x)
+    ry = props.original_h if props.has_original_resolution else max(1, context.scene.render.resolution_y)
     target_ratio = (props.target_w / max(1, props.target_h)) * (ry / rx)
     current_ratio = props.norm_w / max(0.001, props.norm_h)
 
@@ -143,8 +143,8 @@ def _fit_crop_to_target_aspect(context, props) -> None:
 
 def _expand_crop_to_target_aspect(context, props) -> None:
     """Expand the crop around its center to match target aspect."""
-    rx = max(1, context.scene.render.resolution_x)
-    ry = max(1, context.scene.render.resolution_y)
+    rx = props.original_w if props.has_original_resolution else max(1, context.scene.render.resolution_x)
+    ry = props.original_h if props.has_original_resolution else max(1, context.scene.render.resolution_y)
     target_ratio = (props.target_w / max(1, props.target_h)) * (ry / rx)
     current_ratio = props.norm_w / max(0.001, props.norm_h)
 
@@ -190,6 +190,15 @@ def _apply_to_render(context, props, *, scale_resolution=True) -> None:
     if scale_resolution and props.enabled and nw > 0.0 and nh > 0.0:
         rd.resolution_x = max(1, round(props.target_w / nw))
         rd.resolution_y = max(1, round(props.target_h / nh))
+
+        # Sync pixel fields with the new scaled resolution to prevent UI mismatch
+        global _updating
+        old_updating = _updating
+        _updating = True
+        try:
+            _sync_pixel_from_norm(context, props)
+        finally:
+            _updating = old_updating
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +346,9 @@ def _cap_update_pixel_h(self, context):
 
 
 def _cap_update_enabled(self, context):
+    global _updating
+    if _updating:
+        return
     p = context.scene.ccr_props
     rd = context.scene.render
     if p.enabled:
@@ -348,6 +360,9 @@ def _cap_update_enabled(self, context):
 
 
 def _cap_update_crop_to_border(self, context):
+    global _updating
+    if _updating:
+        return
     p = context.scene.ccr_props
     if p.enabled:
         context.scene.render.use_crop_to_border = p.crop_to_border
@@ -656,7 +671,7 @@ class CCR_OT_target_preset(Operator):
         p = context.scene.ccr_props
         rd = context.scene.render
         presets = {
-            "SCENE": (rd.resolution_x, rd.resolution_y),
+            "SCENE": (p.original_w if p.has_original_resolution else rd.resolution_x, p.original_h if p.has_original_resolution else rd.resolution_y),
             "HD": (1920, 1080),
             "UHD": (3840, 2160),
             "SQUARE": (1080, 1080),
@@ -712,15 +727,37 @@ class CCR_OT_crop_to_selection(Operator):
             self.report({'ERROR'}, "Scene has no active camera")
             return {'CANCELLED'}
 
+        # Ensure original resolution is captured
+        _capture_original_resolution(context, p)
+
+        # Store active state, temporarily revert scene settings to uncropped original resolution for correct projection aspect
+        old_use_border = context.scene.render.use_border
+        old_res_x = context.scene.render.resolution_x
+        old_res_y = context.scene.render.resolution_y
+
+        context.scene.render.use_border = False
+        context.scene.render.resolution_x = p.original_w
+        context.scene.render.resolution_y = p.original_h
+
+        # Force Blender dependency graph update to recalculate camera projection matrices
+        context.view_layer.update()
+
         coords = []
-        for obj in context.selected_objects:
-            if obj.type == 'CAMERA' or not hasattr(obj, "bound_box"):
-                continue
-            for corner in obj.bound_box:
-                world = obj.matrix_world @ mathutils.Vector(corner)
-                co = world_to_camera_view(scene, camera, world)
-                if co.z > 0.0:
-                    coords.append(co)
+        try:
+            for obj in context.selected_objects:
+                if obj.type == 'CAMERA' or not hasattr(obj, "bound_box"):
+                    continue
+                for corner in obj.bound_box:
+                    world = obj.matrix_world @ mathutils.Vector(corner)
+                    co = world_to_camera_view(scene, camera, world)
+                    if co.z > 0.0:
+                        coords.append(co)
+        finally:
+            # Revert scene render settings to previous state
+            context.scene.render.use_border = old_use_border
+            context.scene.render.resolution_x = old_res_x
+            context.scene.render.resolution_y = old_res_y
+            context.view_layer.update()
 
         if not coords:
             self.report({'ERROR'}, "No selected object bounds are visible to the camera")
@@ -742,6 +779,7 @@ class CCR_OT_crop_to_selection(Operator):
         nw = min(1.0 - nx, width + pad_x * 2.0)
         nh = min(1.0 - ny, height + pad_y * 2.0)
 
+        # Apply properties atomically under update guard
         _updating = True
         try:
             p.norm_x = nx
@@ -750,7 +788,6 @@ class CCR_OT_crop_to_selection(Operator):
             p.norm_h = max(0.001, nh)
             if p.auto_fit_target_aspect:
                 _expand_crop_to_target_aspect(context, p)
-            _capture_original_resolution(context, p)
             p.enabled = True
         finally:
             _updating = False
@@ -781,8 +818,8 @@ class CCR_OT_apply_preset(Operator):
         global _updating
         p = context.scene.ccr_props
         rd = context.scene.render
-        rx = max(1, rd.resolution_x)
-        ry = max(1, rd.resolution_y)
+        rx = p.original_w if p.has_original_resolution else max(1, rd.resolution_x)
+        ry = p.original_h if p.has_original_resolution else max(1, rd.resolution_y)
 
         nx, ny, nw, nh = 0.0, 0.0, 1.0, 1.0
         tw, th = rx, ry
@@ -1156,11 +1193,9 @@ class CCR_OT_draw_border(Operator):
         self._norm_y2 = 0.0
         self._drag_region = None
         self._drag_area = None
-        self._centered_drag = False
-        self._force_square = False
-        self._temporary_lock_aspect = False
-        self._draw_base_w = 0
-        self._draw_base_h = 0
+        self._alt_held = False
+        self._shift_held = False
+        self._ctrl_held = False
 
     @classmethod
     def poll(cls, context):
@@ -1173,10 +1208,22 @@ class CCR_OT_draw_border(Operator):
     def invoke(self, context, event):
         self._reset_state()
         self._active = True
+
+        # Store pre-draw settings so we can restore them if cancelled
         p = context.scene.ccr_props
-        rd = context.scene.render
-        self._draw_base_w = max(1, rd.resolution_x)
-        self._draw_base_h = max(1, rd.resolution_y)
+        self._pre_draw_res_x = context.scene.render.resolution_x
+        self._pre_draw_res_y = context.scene.render.resolution_y
+        self._pre_draw_use_border = context.scene.render.use_border
+        self._pre_draw_border_min_x = context.scene.render.border_min_x
+        self._pre_draw_border_min_y = context.scene.render.border_min_y
+        self._pre_draw_border_max_x = context.scene.render.border_max_x
+        self._pre_draw_border_max_y = context.scene.render.border_max_y
+
+        if p.enabled and p.has_original_resolution:
+            # Temporarily restore original resolution during drawing to prevent aspect jumps
+            context.scene.render.resolution_x = p.original_w
+            context.scene.render.resolution_y = p.original_h
+            context.view_layer.update()
 
         # Register GPU draw handler on SpaceView3D
         args = (self,)
@@ -1217,15 +1264,15 @@ class CCR_OT_draw_border(Operator):
                 self._is_dragging = True
                 self._drag_region = region
                 self._drag_area = area
+                self._alt_held = event.alt
+                self._shift_held = event.shift
+                self._ctrl_held = event.ctrl
                 # Map mouse position through camera frame
                 nx, ny = _mouse_to_render_norm(context, event, region, area)
-                self._norm_x1 = _clamp01(nx)
-                self._norm_y1 = _clamp01(ny)
-                self._norm_x2 = self._norm_x1
-                self._norm_y2 = self._norm_y1
-                self._centered_drag = event.alt
-                self._force_square = event.ctrl
-                self._temporary_lock_aspect = event.shift
+                self._norm_x1 = nx
+                self._norm_y1 = ny
+                self._norm_x2 = nx
+                self._norm_y2 = ny
                 area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
@@ -1235,19 +1282,38 @@ class CCR_OT_draw_border(Operator):
                     a = self._drag_area or area
                     if r:
                         self._norm_x2, self._norm_y2 = self._get_constrained_coords(context, event, r, a)
-                self._finalize_crop(context)
+                self._finalize_crop(context, event)
                 self._cleanup(context)
                 return {'FINISHED'}
 
         elif event.type == 'MOUSEMOVE':
             if self._is_dragging:
+                self._alt_held = event.alt
+                self._shift_held = event.shift
+                self._ctrl_held = event.ctrl
                 r = self._drag_region or region
                 a = self._drag_area or area
                 if r:
                     self._norm_x2, self._norm_y2 = self._get_constrained_coords(context, event, r, a)
-                    self._live_update(context)
+                    self._live_update(context, event)
                     a.tag_redraw()
-            return {'RUNNING_MODAL'}
+                return {'RUNNING_MODAL'}
+            return {'PASS_THROUGH'}
+
+        elif event.type in {'LEFT_SHIFT', 'RIGHT_SHIFT', 'LEFT_ALT', 'RIGHT_ALT', 'LEFT_CTRL', 'RIGHT_CTRL'}:
+            # Handle modifier key press/release state changes when mouse is stationary
+            if self._is_dragging:
+                self._alt_held = event.alt
+                self._shift_held = event.shift
+                self._ctrl_held = event.ctrl
+                r = self._drag_region or region
+                a = self._drag_area or area
+                if r:
+                    self._norm_x2, self._norm_y2 = self._get_constrained_coords(context, event, r, a)
+                    self._live_update(context, event)
+                    a.tag_redraw()
+                return {'RUNNING_MODAL'}
+            return {'PASS_THROUGH'}
 
         elif event.type in {'RIGHTMOUSE', 'ESC'}:
             self._cleanup(context)
@@ -1257,19 +1323,26 @@ class CCR_OT_draw_border(Operator):
 
     def _get_constrained_coords(self, context, event, region, area):
         nx2, ny2 = _mouse_to_render_norm(context, event, region, area)
-        nx2 = _clamp01(nx2)
-        ny2 = _clamp01(ny2)
+
+        # Snap to a 5% grid (0.05 steps) when Ctrl is held
+        if event.ctrl:
+            nx2 = round(nx2 * 20.0) / 20.0
+            ny2 = round(ny2 * 20.0) / 20.0
 
         p = context.scene.ccr_props
-        lock_aspect = p.lock_aspect != event.shift
-        if event.ctrl:
-            lock_aspect = True
+        lock_aspect = p.lock_aspect
+        if event.shift:
+            lock_aspect = not lock_aspect
 
         if lock_aspect and p.target_w > 0 and p.target_h > 0:
-            # Use render resolution aspect for constraint in normalized space
-            rx = max(1, self._draw_base_w or context.scene.render.resolution_x)
-            ry = max(1, self._draw_base_h or context.scene.render.resolution_y)
-            aspect = 1.0 if event.ctrl else (p.target_w / p.target_h) * (ry / rx)
+            rx = max(1, context.scene.render.resolution_x)
+            ry = max(1, context.scene.render.resolution_y)
+            aspect = (p.target_w / p.target_h) * (ry / rx)
+            
+            # Constrain to 1:1 square aspect when Shift is held if aspect lock was OFF
+            if event.shift and not p.lock_aspect:
+                aspect = ry / rx
+
             dnw = nx2 - self._norm_x1
             dnh = ny2 - self._norm_y1
             dnh_locked = abs(dnw) / aspect
@@ -1277,24 +1350,17 @@ class CCR_OT_draw_border(Operator):
                 ny2 = self._norm_y1 - dnh_locked
             else:
                 ny2 = self._norm_y1 + dnh_locked
-            ny2 = _clamp01(ny2)
-
-        self._centered_drag = event.alt
-        self._force_square = event.ctrl
-        self._temporary_lock_aspect = event.shift
         return nx2, ny2
 
-    def _live_update(self, context):
+    def _live_update(self, context, event):
         """Update CCR properties in real-time during drag for live preview."""
         global _updating
         p = context.scene.ccr_props
 
+        # Compute crop rectangle using original helper to handle Alt centered drawing
         nx, ny, nw, nh = _rect_from_points(
-            self._norm_x1,
-            self._norm_y1,
-            self._norm_x2,
-            self._norm_y2,
-            centered=self._centered_drag,
+            self._norm_x1, self._norm_y1, self._norm_x2, self._norm_y2,
+            centered=event.alt
         )
 
         # Suppress callbacks, set all values, then apply manually
@@ -1306,27 +1372,22 @@ class CCR_OT_draw_border(Operator):
             p.norm_h = nh
             _capture_original_resolution(context, p)
             p.enabled = True
-        finally:
-            _updating = False
-
-        _clamp_crop(p)
-        _updating = True
-        try:
+            _clamp_crop(p)
             _sync_pixel_from_norm(context, p)
         finally:
             _updating = False
+
         _apply_to_render(context, p, scale_resolution=False)
 
-    def _finalize_crop(self, context):
+    def _finalize_crop(self, context, event):
         """Apply the final crop to CCR settings with proper callbacks."""
+        self._finalized = True
         p = context.scene.ccr_props
 
+        # Compute crop rectangle using original helper to handle Alt centered drawing
         nx, ny, nw, nh = _rect_from_points(
-            self._norm_x1,
-            self._norm_y1,
-            self._norm_x2,
-            self._norm_y2,
-            centered=self._centered_drag,
+            self._norm_x1, self._norm_y1, self._norm_x2, self._norm_y2,
+            centered=event.alt
         )
 
         # Ignore tiny crops
@@ -1343,15 +1404,11 @@ class CCR_OT_draw_border(Operator):
             p.norm_h = nh
             _capture_original_resolution(context, p)
             p.enabled = True
-        finally:
-            _updating = False
-
-        _clamp_crop(p)
-        _updating = True
-        try:
+            _clamp_crop(p)
             _sync_pixel_from_norm(context, p)
         finally:
             _updating = False
+
         _apply_to_render(context, p)
 
     def _cleanup(self, context):
@@ -1363,6 +1420,19 @@ class CCR_OT_draw_border(Operator):
             except (ValueError, TypeError):
                 pass
             self._handle = None
+
+        # If cancelled (i.e. did not finalize crop), restore the pre-draw settings
+        if not getattr(self, "_finalized", False):
+            if hasattr(self, "_pre_draw_res_x"):
+                context.scene.render.resolution_x = self._pre_draw_res_x
+                context.scene.render.resolution_y = self._pre_draw_res_y
+                context.scene.render.use_border = self._pre_draw_use_border
+                context.scene.render.border_min_x = self._pre_draw_border_min_x
+                context.scene.render.border_min_y = self._pre_draw_border_min_y
+                context.scene.render.border_max_x = self._pre_draw_border_max_x
+                context.scene.render.border_max_y = self._pre_draw_border_max_y
+                context.view_layer.update()
+
         # Redraw all 3D viewports
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
@@ -1421,7 +1491,14 @@ def _draw_border_callback(op):
     # for its built-in render border display, so they cannot diverge.
     try:
         rd = bpy.context.scene.render
-        if rd.use_border:
+        if op._is_dragging:
+            nx1, ny1, nw, nh = _rect_from_points(
+                op._norm_x1, op._norm_y1, op._norm_x2, op._norm_y2,
+                centered=getattr(op, "_alt_held", False)
+            )
+            nx2 = nx1 + nw
+            ny2 = ny1 + nh
+        elif rd.use_border:
             nx1 = rd.border_min_x
             ny1 = rd.border_min_y
             nx2 = rd.border_max_x
@@ -1432,8 +1509,16 @@ def _draw_border_callback(op):
             nx2 = op._norm_x2
             ny2 = op._norm_y2
     except (AttributeError, RuntimeError):
-        nx1, ny1 = op._norm_x1, op._norm_y1
-        nx2, ny2 = op._norm_x2, op._norm_y2
+        if op._is_dragging:
+            nx1, ny1, nw, nh = _rect_from_points(
+                op._norm_x1, op._norm_y1, op._norm_x2, op._norm_y2,
+                centered=getattr(op, "_alt_held", False)
+            )
+            nx2 = nx1 + nw
+            ny2 = ny1 + nh
+        else:
+            nx1, ny1 = op._norm_x1, op._norm_y1
+            nx2, ny2 = op._norm_x2, op._norm_y2
 
     # Convert render-border normalized coords to pixel coords via camera frame
     x1 = int(cam_x + nx1 * cam_w)
@@ -1450,14 +1535,9 @@ def _draw_border_callback(op):
     if not op._is_dragging or rect_w < 2 or rect_h < 2:
         # Not dragging yet — show instruction text centered in viewport
         _draw_text_2d(
-            width // 2 - 205, height // 2 + 6,
-            "Click & drag to define crop  |  Alt center  Shift aspect  Ctrl square",
+            width // 2 - 145, height // 2 + 6,
+            "Click & drag to define crop region  (Esc to cancel)",
             DIM_WHITE, 13,
-        )
-        _draw_text_2d(
-            width // 2 - 82, height // 2 - 14,
-            "Esc or Right Click to cancel",
-            DIM_WHITE, 11,
         )
         return
 
@@ -1531,15 +1611,6 @@ def _draw_border_callback(op):
         f"Required Render: {req_w} \u00d7 {req_h} px",
         f"Norm: ({crop_norm_x:.3f}, {crop_norm_y:.3f}) \u2192 ({crop_norm_x+crop_norm_w:.3f}, {crop_norm_y+crop_norm_h:.3f})",
     ]
-    active_modes = []
-    if op._centered_drag:
-        active_modes.append("Center")
-    if op._force_square:
-        active_modes.append("Square")
-    elif op._temporary_lock_aspect:
-        active_modes.append("Aspect Toggle")
-    if active_modes:
-        lines.append("Mode: " + " + ".join(active_modes))
     _draw_text_block_bg(text_x, text_y, lines, 12)
 
     # ----- Draw mouse coordinates at bottom-left -----
